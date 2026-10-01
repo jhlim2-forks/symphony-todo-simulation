@@ -22,7 +22,7 @@ type store struct { mu sync.Mutex; items map[int]todo; nextID int }
 func (s *store) list() []todo { s.mu.Lock(); defer s.mu.Unlock(); out := make([]todo, 0, len(s.items)); for _, t := range s.items { out = append(out, t) }; sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID }); return out }
 func (s *store) create(text string) todo { s.mu.Lock(); defer s.mu.Unlock(); t := todo{ID: s.nextID, Text: text}; s.items[t.ID] = t; s.nextID++; return t }
 func (s *store) exists(id int) bool { s.mu.Lock(); defer s.mu.Unlock(); _, ok := s.items[id]; return ok }
-func (s *store) setCompleted(id int, completed bool) bool { s.mu.Lock(); defer s.mu.Unlock(); t, ok := s.items[id]; if !ok { return false }; t.Completed = completed; s.items[id] = t; return true }
+func (s *store) setCompleted(id int, completed bool) (todo, bool) { s.mu.Lock(); defer s.mu.Unlock(); t, ok := s.items[id]; if !ok { return todo{}, false }; t.Completed = completed; s.items[id] = t; return t, true }
 func (s *store) delete(id int) bool { s.mu.Lock(); defer s.mu.Unlock(); if _, ok := s.items[id]; !ok { return false }; delete(s.items, id); return true }
 
 // NewHandler owns its own independent, concurrency-safe in-memory TODO store.
@@ -45,8 +45,9 @@ func NewHandler() http.Handler {
 		id, ok := todoID(r); if !ok || !s.exists(id) { http.NotFound(w, r); return }
 		var req struct { Completed *bool `json:"completed"` }
 		if !decodeJSONObject(r, &req) || req.Completed == nil { http.Error(w, "invalid request", http.StatusBadRequest); return }
-		if !s.setCompleted(id, *req.Completed) { http.NotFound(w, r); return }
-		writeJSON(w, http.StatusOK, s.list())
+		updated, ok := s.setCompleted(id, *req.Completed)
+		if !ok { http.NotFound(w, r); return }
+		writeJSON(w, http.StatusOK, updated)
 	})
 	mux.HandleFunc("DELETE /api/todos/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id, ok := todoID(r); if !ok || !s.delete(id) { http.NotFound(w, r); return }; w.WriteHeader(http.StatusNoContent)
