@@ -1,7 +1,7 @@
 # 설계
 
 이 문서는 [requirements.md](requirements.md)의 요구사항을 구현하기 위한 설계입니다.
-요구사항 ID는 `REQ-01`~`REQ-22`를 그대로 사용합니다.
+요구사항 ID는 `REQ-01`~`REQ-23`을 그대로 사용합니다.
 
 ## 구조
 
@@ -24,11 +24,38 @@
 
 - `GET /api/todos`, `POST /api/todos`
 - `PATCH /api/todos/{id}`, `DELETE /api/todos/{id}`
-- `GET /` — `index.html` 응답(그 외 경로는 404)
+- `GET /{$}` — `index.html` 응답
+
+루트는 반드시 `GET /{$}` 패턴으로 등록합니다. `GET /`로 등록하면 `/foo`, `/api/unknown`
+같은 하위 경로까지 모두 매칭되어 화면 문서를 200으로 돌려주므로 REQ-23과 어긋납니다.
+`{$}`는 경로가 정확히 `/`일 때만 매칭하므로, 위에 등록한 패턴에 해당하지 않는 경로는
+`http.ServeMux`의 기본 동작에 따라 404가 됩니다. 표준 라이브러리 버전 등의 이유로
+`{$}`를 쓸 수 없는 경우에는 `GET /` 핸들러 안에서 `r.URL.Path != "/"`이면
+`http.NotFound`를 호출하는 명시적 경로 검사로 같은 동작을 보장합니다(둘 중 하나를 반드시 적용).
+
+등록된 경로에 정의되지 않은 메서드로 들어온 요청은 `http.ServeMux`가 405로 응답합니다.
 
 ## API
 
 응답 본문이 있는 경우 `Content-Type: application/json; charset=utf-8`을 설정합니다.
+
+### 요청 본문 디코딩 규칙(POST·PATCH 공통)
+
+REQ-19에 따라 요청 본문은 **전체가 정확히 하나의 JSON 객체**여야 합니다. 다음 절차를
+`POST /api/todos`와 `PATCH /api/todos/{id}`가 공통으로 사용합니다.
+
+1. `dec := json.NewDecoder(r.Body)`로 디코더를 만들고 `dec.Decode(&req)`로 첫 값을 읽습니다.
+   오류가 나면(문법 오류, 타입 불일치, 빈 본문의 `io.EOF` 포함) 400입니다.
+2. 디코딩된 값이 JSON 객체여야 합니다. 배열·문자열·숫자·`true`·`null` 등 객체가 아닌
+   최상위 값은 400입니다(구조체로 디코딩하면 객체가 아닌 값은 1단계에서 오류가 됩니다).
+3. 이어서 `dec.Decode(&json.RawMessage{})`를 한 번 더 호출하고 결과가 `io.EOF`가 아니면
+   400입니다. 이 검사로 `{"text":"a"} garbage`처럼 뒤에 쓰레기가 붙은 본문과
+   `{"text":"a"}{"text":"b"}`처럼 두 번째 JSON 값이 이어지는 본문을 모두 거부합니다.
+   본문 끝의 공백·줄바꿈만 남은 경우는 `io.EOF`가 되므로 허용됩니다.
+4. 1~3단계 중 하나라도 실패하면 저장소를 전혀 변경하지 않고 400으로 응답합니다.
+
+`json.Unmarshal`이나 한 번의 `Decode`만 사용하는 구현은 3단계를 건너뛰어 잘못된 본문을
+201/200으로 처리하므로 사용하지 않습니다.
 
 ### GET /api/todos
 
@@ -37,14 +64,15 @@
 
 ### POST /api/todos
 
-- 본문 `{"text":"내용"}`을 디코딩합니다. JSON 파싱 실패 시 400.
+- 본문 `{"text":"내용"}`을 위의 「요청 본문 디코딩 규칙」대로 디코딩합니다. 파싱 실패, 객체가 아닌 최상위 값, 객체 뒤에 남은 추가 데이터는 모두 400.
 - `text`에 `strings.TrimSpace`를 적용하고, 길이를 문자(룬) 수로 셉니다. 0자이거나 200자를 초과하면 400.
 - 새 id를 `nextID`에서 받아 항목을 저장하고 201과 생성된 항목 전체를 반환합니다.
 
 ### PATCH /api/todos/{id}
 
 - 경로의 `{id}`를 정수로 해석합니다. 정수가 아니거나 저장소에 없으면 404.
-- 본문 `{"completed":true|false}`를 디코딩합니다. JSON 파싱 실패, `completed` 키 누락, boolean이 아닌 값이면 400. 누락과 비boolean을 구분하려면 `*bool` 또는 `json.RawMessage`로 받아 확인합니다.
+- 본문 `{"completed":true|false}`를 위의 「요청 본문 디코딩 규칙」대로 디코딩합니다. 파싱 실패, 객체가 아닌 최상위 값, 객체 뒤에 남은 추가 데이터, `completed` 키 누락, boolean이 아닌 값이면 400. 누락과 비boolean을 구분하려면 `*bool` 또는 `json.RawMessage`로 받아 확인합니다.
+- 본문 검증 순서는 디코딩 규칙 통과 → `completed` 확인이며, id가 없으면 404가 400보다 먼저 결정됩니다(AC-06).
 - 해당 항목의 `completed`를 교체하고 200과 변경된 전체 항목을 반환합니다.
 
 ### DELETE /api/todos/{id}
@@ -106,6 +134,12 @@
 - **AC-22** (REQ-12) 뷰포트 폭 375px에서 가로 스크롤이 생기지 않고 입력란·필터·목록·삭제 버튼이 모두 보이며 조작 가능하다.
 - **AC-23** (REQ-13) `<img src=x onerror=alert(1)>`를 추가하면 그 문자열이 그대로 목록에 보이고 스크립트가 실행되지 않는다.
 
+### 본문 디코딩과 라우팅
+
+- **AC-24** (REQ-19) `POST /api/todos`에 다음 본문을 각각 보내면 모두 400이고 저장소에 항목이 생기지 않는다(직후 `GET /api/todos`가 `[]`): `{"text":"a"} garbage`, `{"text":"a"}{"text":"b"}`, `{"text":"a"} 123`, `{"text":"a"}null`, 빈 본문(`""`), `[{"text":"a"}]`, `"a"`. `{"text":"a"}` 뒤에 공백·줄바꿈만 있는 본문은 201이다.
+- **AC-25** (REQ-19) 미완료 항목에 `PATCH /api/todos/{id}`로 `{"completed":true} garbage`와 `{"completed":true}{"completed":false}`를 보내면 각각 400이고, 해당 항목의 `completed`는 호출 전 값 그대로다. `{"completed":true}` 뒤에 줄바꿈만 있는 본문은 200이다.
+- **AC-26** (REQ-23) `GET /`는 200과 화면 문서(HTML)를 반환한다. `GET /foo`, `GET /index.html`, `GET /api/unknown`, `GET /api/todos/1/extra`는 모두 404이며 HTML 화면 문서를 반환하지 않는다.
+
 ## 위험
 
 | 위험 | 영향 | 대응 |
@@ -117,3 +151,5 @@
 | `completed` 누락과 `false`를 구분하지 못하면 400이어야 할 요청이 통과한다 | 계약 위반 | `*bool`/`json.RawMessage`로 키 존재를 확인(AC-07) |
 | 목록을 `innerHTML`로 그리면 입력이 HTML로 해석된다 | 스크립트 주입 | `textContent`만 사용하고 주입 문자열로 검증(AC-23) |
 | 표준 라이브러리만 쓰므로 라우팅·검증을 직접 작성한다 | 경로 파싱 실수로 404/400 분기가 어긋난다 | `http.ServeMux`의 메서드·와일드카드 패턴을 사용하고 경계 사례를 테스트로 고정 |
+| `Decode`를 한 번만 호출하면 첫 JSON 값 뒤의 쓰레기·두 번째 값을 놓친다 | `{"text":"a"} garbage`가 201로 처리되어 REQ-19 위반 | 디코딩 규칙 3단계(두 번째 `Decode`가 `io.EOF`인지 확인)를 필수로 두고 AC-24·AC-25로 검증 |
+| 루트를 `GET /`로 등록하면 하위 경로까지 매칭된다 | 없는 경로가 404 대신 200 HTML을 반환해 REQ-23 위반 | `GET /{$}` 루트 전용 패턴(또는 `r.URL.Path != "/"` 명시 검사)을 사용하고 AC-26으로 검증 |

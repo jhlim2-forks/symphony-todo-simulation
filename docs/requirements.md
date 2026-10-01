@@ -37,10 +37,11 @@
 - **REQ-16** `PATCH /api/todos/{id}`는 `{"completed":true}` 형태의 본문을 받아 200과 함께 변경된 전체 항목을 반환한다.
 - **REQ-17** `DELETE /api/todos/{id}`는 204와 빈 본문을 반환한다.
 - **REQ-18** 존재하지 않는 id에 대한 `PATCH`·`DELETE` 요청은 404를 반환한다.
-- **REQ-19** 빈 text, 200자 초과 text, 잘못된 JSON, `completed` 누락 또는 boolean이 아닌 `completed`는 400을 반환한다.
+- **REQ-19** 빈 text, 200자 초과 text, 잘못된 JSON, `completed` 누락 또는 boolean이 아닌 `completed`는 400을 반환한다. `POST`·`PATCH` 요청 본문은 전체가 정확히 하나의 JSON 객체여야 하며, 본문이 비었거나 객체가 아닌 JSON 값(배열·문자열·숫자 등)이거나 객체 뒤에 추가 데이터(쓰레기 문자, 두 번째 JSON 값)가 붙은 경우도 잘못된 JSON으로 보고 400을 반환한다.
 - **REQ-20** 할 일 id는 양의 정수이며, 항목을 삭제한 뒤에도 그 id를 다시 사용하지 않는다.
 - **REQ-21** `NewHandler()` 호출마다 서로 독립된 메모리 저장소를 사용하고, 동시에 들어오는 요청에도 안전하게 동작한다.
 - **REQ-22** 구현은 Go 표준 라이브러리와 HTML/CSS/JavaScript만 사용하고 외부 패키지·CDN을 추가하지 않는다. `main.go`의 `-listen` 플래그와 `NewHandler() http.Handler` 시그니처를 유지한다.
+- **REQ-23** 경로 `/`(루트)만 화면 문서를 반환하고, 위에서 정의한 API 경로와 루트를 제외한 경로(예: `/foo`, `/api/unknown`)는 404를 반환한다.
 
 ## API 계약
 
@@ -57,7 +58,9 @@
 | 빈 text·200자 초과·잘못된 JSON·`completed` 누락/비boolean | 400 |
 
 - `POST /api/todos`의 `text`는 앞뒤 공백을 제거한 값으로 저장하며, 그 길이가 1~200자여야 합니다(REQ-07).
+- `POST`·`PATCH`의 요청 본문은 전체가 정확히 하나의 JSON 객체여야 합니다. 빈 본문, 객체가 아닌 JSON 값, 객체 뒤에 남은 추가 데이터(`{"text":"a"} garbage`, `{"text":"a"}{"text":"b"}` 등)는 모두 잘못된 JSON으로 400입니다(REQ-19).
 - id는 양의 정수이고 삭제 후 재사용하지 않습니다(REQ-20).
+- 위 표의 API 경로와 화면을 돌려주는 루트 경로 `/` 외의 경로는 404입니다(REQ-23).
 - 오류 응답(400·404)의 본문 형식은 이 계약에서 규정하지 않으며, 클라이언트는 상태 코드로 판별합니다.
 
 ## 범위 밖
