@@ -245,6 +245,34 @@ func TestDueDateValidation(t *testing.T) {
 	}
 }
 
+// REQ-11: 마감일은 날짜 문자열 또는 null이어야 하며 다른 JSON 값은 거절하고 저장하지 않는다.
+func TestDueRejectsNonStringValues(t *testing.T) {
+	h := NewHandler()
+	call(h, "POST", "/api/todos", `{"title":"기존 할 일","due":"2026-03-01"}`)
+	for _, due := range []string{`1`, `true`, `{}`} {
+		for _, tc := range []struct {
+			method, path, body string
+		}{
+			{"POST", "/api/todos", `{"title":"잘못된 마감일","due":` + due + `}`},
+			{"PATCH", "/api/todos/1", `{"due":` + due + `}`},
+		} {
+			w := call(h, tc.method, tc.path, tc.body)
+			if w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"invalid_json"`) {
+				t.Fatalf("%s due via %s: expected invalid_json, got %d %s", due, tc.method, w.Code, w.Body)
+			}
+		}
+	}
+	var listed struct {
+		Todos []Todo `json:"todos"`
+	}
+	if err := json.Unmarshal(call(h, "GET", "/api/todos", "").Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Todos) != 1 || listed.Todos[0].Title != "기존 할 일" || listed.Todos[0].Due == nil || *listed.Todos[0].Due != "2026-03-01" {
+		t.Fatalf("invalid due values changed stored todos: %+v", listed.Todos)
+	}
+}
+
 // REQ-13, REQ-14: 마감일은 독립적으로 수정·삭제되고 목록 순서는 유지된다.
 func TestDueUpdateAndDisplay(t *testing.T) {
 	h := NewHandler()
@@ -256,6 +284,12 @@ func TestDueUpdateAndDisplay(t *testing.T) {
 	if v.Due == nil || *v.Due != "2026-04-02" || v.Title != "가" || !v.Done {
 		t.Fatal(w.Body)
 	}
+	w = call(h, "PATCH", "/api/todos/1", `{"done":false}`)
+	v = decodeTodo(t, w.Body.Bytes())
+	if v.Due == nil || *v.Due != "2026-04-02" || v.Done {
+		t.Fatalf("done-only PATCH changed due date: %+v", v)
+	}
+	call(h, "PATCH", "/api/todos/1", `{"done":true}`)
 	if call(h, "PATCH", "/api/todos/1", `{"due":"2026-02-30"}`).Code != 400 {
 		t.Fatal("invalid due accepted")
 	}
