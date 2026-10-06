@@ -47,9 +47,13 @@ func TestTitleValidation(t *testing.T) {
 		t.Fatalf("trim: %d %s", w.Code, w.Body)
 	}
 	for _, tc := range []struct{ title, code string }{{"   ", "title_blank"}, {strings.Repeat("가", 201), "title_too_long"}} {
+		before := call(h, "GET", "/api/todos", "").Body.String()
 		w = call(h, "POST", "/api/todos", fmt.Sprintf(`{"title":%q}`, tc.title))
 		if w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"`+tc.code+`"`) {
 			t.Fatalf("%s: %d %s", tc.code, w.Code, w.Body)
+		}
+		if after := call(h, "GET", "/api/todos", "").Body.String(); after != before {
+			t.Fatalf("rejected %s title changed list: before=%s after=%s", tc.code, before, after)
 		}
 	}
 	for _, tc := range []struct{ body, code string }{{`{"title":""}`, "title_blank"}, {`{"title":null}`, "invalid_json"}, {`{"title":7}`, "invalid_json"}} {
@@ -81,10 +85,23 @@ func TestOrderAndCompletion(t *testing.T) {
 	for _, s := range []string{"가", "나", "다"} {
 		call(h, "POST", "/api/todos", fmt.Sprintf(`{"title":%q}`, s))
 	}
-	for _, done := range []string{"true", "true", "false", "true"} {
-		w := call(h, "PATCH", "/api/todos/1", `{"done":`+done+`}`)
+	for _, tc := range []struct {
+		done string
+		want bool
+	}{{"true", true}, {"true", true}, {"false", false}, {"true", true}} {
+		w := call(h, "PATCH", "/api/todos/1", `{"done":`+tc.done+`}`)
 		if w.Code != 200 {
 			t.Fatalf("patch: %d %s", w.Code, w.Body)
+		}
+		var updated Todo
+		if err := json.Unmarshal(w.Body.Bytes(), &updated); err != nil || updated.Done != tc.want {
+			t.Fatalf("patch response for done=%s: %+v err=%v", tc.done, updated, err)
+		}
+		var listed struct {
+			Todos []Todo `json:"todos"`
+		}
+		if err := json.Unmarshal(call(h, "GET", "/api/todos", "").Body.Bytes(), &listed); err != nil || listed.Todos[0].Done != tc.want {
+			t.Fatalf("list state for done=%s: %+v err=%v", tc.done, listed, err)
 		}
 	}
 	for _, body := range []string{`{"done":null}`, `{}`, `{"done":"true"}`} {
@@ -123,9 +140,20 @@ func TestDeleteAndMissingIDs(t *testing.T) {
 		t.Fatalf("remaining: %s", w.Body)
 	}
 	for _, path := range []string{"/api/todos/999", "/api/todos/abc"} {
+		before := call(h, "GET", "/api/todos", "").Body.String()
 		w = call(h, "PATCH", path, `{"done":false}`)
 		if w.Code != 404 || !strings.Contains(w.Body.String(), `"code":"not_found"`) {
 			t.Fatalf("%s: %d %s", path, w.Code, w.Body)
+		}
+		if after := call(h, "GET", "/api/todos", "").Body.String(); after != before {
+			t.Fatalf("missing ID request changed list: before=%s after=%s", before, after)
+		}
+		w = call(h, "DELETE", path, "")
+		if w.Code != 404 || !strings.Contains(w.Body.String(), `"code":"not_found"`) {
+			t.Fatalf("DELETE %s: %d %s", path, w.Code, w.Body)
+		}
+		if after := call(h, "GET", "/api/todos", "").Body.String(); after != before {
+			t.Fatalf("missing ID delete changed list: before=%s after=%s", before, after)
 		}
 	}
 }
@@ -143,7 +171,7 @@ func TestPageAndErrorMessages(t *testing.T) {
 			t.Fatalf("error message %q must appear only once in the page", msg)
 		}
 	}
-	if strings.Contains(page, `id="error">`) && !strings.Contains(page, `id="error" role="alert"></p>`) {
+	if !strings.Contains(page, `id="error" role="alert"></p>`) {
 		t.Fatal("error area must initially be empty")
 	}
 	start := strings.Index(page, "<script type=\"application/json\" id=\"error-messages\">") + len("<script type=\"application/json\" id=\"error-messages\">")
