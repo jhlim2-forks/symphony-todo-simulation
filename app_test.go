@@ -312,3 +312,109 @@ func TestDueUpdateAndDisplay(t *testing.T) {
 		t.Fatal("empty patch accepted")
 	}
 }
+
+// REQ-15, REQ-16: 완료 비우기 버튼은 처음 잠겨 있고, 완료 개수를 보여 주는 취소 가능한 확인 문구를 둔다.
+func TestClearCompletedConfirmationUI(t *testing.T) {
+	page := call(NewHandler(), "GET", "/", "")
+	html := page.Body.String()
+	if page.Code != http.StatusOK || strings.Count(html, `id="clear-completed"`) != 1 || !strings.Contains(html, `id="clear-completed" disabled`) {
+		t.Fatalf("missing initially disabled clear button: %d", page.Code)
+	}
+	matcher := regexp.MustCompile(`<script type="application/json" id="confirm-messages">([\s\S]*?)</script>`)
+	matches := matcher.FindStringSubmatch(html)
+	if len(matches) != 2 {
+		t.Fatal("confirmation message JSON missing")
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(matches[1]), &payload); err != nil {
+		t.Fatal(err)
+	}
+	want := "완료한 할 일 {count}개를 지웁니다. 지운 항목은 되살릴 수 없습니다. 지우시겠습니까?"
+	errorMatcher := regexp.MustCompile(`<script type="application/json" id="error-messages">([\s\S]*?)</script>`)
+	errorMatches := errorMatcher.FindStringSubmatch(html)
+	var errorPayload struct {
+		Codes map[string]string `json:"codes"`
+	}
+	if len(errorMatches) != 2 || json.Unmarshal([]byte(errorMatches[1]), &errorPayload) != nil {
+		t.Fatal("error message JSON missing or invalid")
+	}
+	if payload["clear_completed"] != want || errorPayload.Codes["clear_completed"] != "" {
+		t.Fatalf("unexpected confirmation message: %v", payload)
+	}
+	if !strings.Contains(html, "window.confirm(confirmMessages.clear_completed.replace('{count}',count))") || !strings.Contains(html, "if(!count||!") {
+		t.Fatal("confirmation does not report the displayed completed count or stop on cancel/zero")
+	}
+}
+
+// REQ-17, REQ-18: 일괄 삭제는 완료 항목만 제거하고 진행 중 항목의 내용·순서·마감일을 보존하며 개수와 남은 목록을 돌려준다.
+func TestDeleteCompletedPreservesInProgressTodosAndIDs(t *testing.T) {
+	h := NewHandler()
+	for _, body := range []string{
+		`{"title":"가","due":"2026-03-01"}`,
+		`{"title":"나","due":"2026-04-02"}`,
+		`{"title":"다"}`,
+		`{"title":"라","due":"2026-05-03"}`,
+	} {
+		if w := call(h, "POST", "/api/todos", body); w.Code != http.StatusCreated {
+			t.Fatalf("create: %d %s", w.Code, w.Body)
+		}
+	}
+	for _, id := range []string{"1", "3"} {
+		if w := call(h, "PATCH", "/api/todos/"+id, `{"done":true}`); w.Code != http.StatusOK {
+			t.Fatalf("complete %s: %d", id, w.Code)
+		}
+	}
+	response := call(h, "DELETE", "/api/todos/completed", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("bulk delete: %d %s", response.Code, response.Body)
+	}
+	var result struct {
+		Deleted int    `json:"deleted"`
+		Todos   []Todo `json:"todos"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Deleted != 2 || len(result.Todos) != 2 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	want := []Todo{{ID: 2, Title: "나", Done: false, Due: ptr("2026-04-02")}, {ID: 4, Title: "라", Done: false, Due: ptr("2026-05-03")}}
+	for i := range want {
+		if result.Todos[i].ID != want[i].ID || result.Todos[i].Title != want[i].Title || result.Todos[i].Done != want[i].Done || result.Todos[i].Due == nil || *result.Todos[i].Due != *want[i].Due {
+			t.Fatalf("in-progress todo changed: got %+v want %+v", result.Todos[i], want[i])
+		}
+	}
+	listed := call(h, "GET", "/api/todos", "")
+	if !strings.Contains(listed.Body.String(), `"id":2`) || !strings.Contains(listed.Body.String(), `"id":4`) || strings.Contains(listed.Body.String(), `"id":1`) || strings.Contains(listed.Body.String(), `"id":3`) {
+		t.Fatalf("server list does not match bulk response: %s", listed.Body)
+	}
+	created := call(h, "POST", "/api/todos", `{"title":"마지막"}`)
+	if v := decodeTodo(t, created.Body.Bytes()); v.ID != 5 {
+		t.Fatalf("deleted ID reused: %+v", v)
+	}
+}
+
+// REQ-18: 완료 항목이 없을 때 일괄 삭제는 오류 없이 0개와 그대로인 목록을 반환한다.
+func TestDeleteCompletedWhenNothingIsCompleted(t *testing.T) {
+	h := NewHandler()
+	call(h, "POST", "/api/todos", `{"title":"진행 중"}`)
+	for _, expected := range []int{0, 0} {
+		w := call(h, "DELETE", "/api/todos/completed", "")
+		var result struct {
+			Deleted int    `json:"deleted"`
+			Todos   []Todo `json:"todos"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || w.Code != http.StatusOK || result.Deleted != expected || len(result.Todos) != 1 || result.Todos[0].Title != "진행 중" {
+			t.Fatalf("unexpected no-op response: %d %+v (%v)", w.Code, result, err)
+		}
+	}
+	empty := call(NewHandler(), "DELETE", "/api/todos/completed", "")
+	if empty.Code != http.StatusOK || !strings.Contains(empty.Body.String(), `"deleted":0`) || !strings.Contains(empty.Body.String(), `"todos":[]`) {
+		t.Fatalf("unexpected empty response: %d %s", empty.Code, empty.Body)
+	}
+	if w := call(h, "GET", "/api/todos/completed", ""); w.Code != http.StatusMethodNotAllowed || !strings.Contains(w.Body.String(), `"code":"method_not_allowed"`) {
+		t.Fatalf("unexpected method handling: %d %s", w.Code, w.Body)
+	}
+}
+
+func ptr(s string) *string { return &s }
