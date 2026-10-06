@@ -28,24 +28,6 @@ type Store struct {
 
 func NewStore() *Store { return &Store{todos: []Todo{}, next: 1} }
 
-func (s *Store) deleteCompleted() (int, []Todo) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	remaining := make([]Todo, 0, len(s.todos))
-	deleted := 0
-	for _, todo := range s.todos {
-		if todo.Done {
-			deleted++
-			continue
-		}
-		remaining = append(remaining, todo)
-	}
-	s.todos = remaining
-	response := make([]Todo, len(s.todos))
-	copy(response, s.todos)
-	return deleted, response
-}
-
 type App struct {
 	store *Store
 	html  []byte
@@ -80,15 +62,6 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		default:
 			a.err(w, 405, "method_not_allowed")
 		}
-		return
-	}
-	if r.URL.Path == "/api/todos/completed" {
-		if r.Method != "DELETE" {
-			a.err(w, 405, "method_not_allowed")
-			return
-		}
-		deleted, todos := a.store.deleteCompleted()
-		writeJSON(w, 200, map[string]any{"deleted": deleted, "todos": todos})
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/todos/") {
