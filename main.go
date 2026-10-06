@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -75,6 +76,21 @@ func fail(w http.ResponseWriter, status int, code string) {
 	writeJSON(w, status, map[string]apiError{"error": {Code: code, Message: errorMessages[code]}})
 }
 
+func decodeJSON(r *http.Request, dst any) error {
+	d := json.NewDecoder(r.Body)
+	if err := d.Decode(dst); err != nil {
+		return err
+	}
+	var extra any
+	if err := d.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return io.ErrUnexpectedEOF
+		}
+		return err
+	}
+	return nil
+}
+
 func newHandler(store *Store) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -97,12 +113,12 @@ func newHandler(store *Store) http.Handler {
 				var body struct {
 					Title json.RawMessage `json:"title"`
 				}
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				if err := decodeJSON(r, &body); err != nil {
 					fail(w, 400, "invalid_json")
 					return
 				}
 				var title string
-				if len(body.Title) == 0 || json.Unmarshal(body.Title, &title) != nil {
+				if len(body.Title) == 0 || string(body.Title) == "null" || json.Unmarshal(body.Title, &title) != nil {
 					fail(w, 400, "invalid_json")
 					return
 				}
@@ -134,13 +150,13 @@ func newHandler(store *Store) http.Handler {
 		switch r.Method {
 		case "PATCH":
 			var body map[string]json.RawMessage
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			if err := decodeJSON(r, &body); err != nil {
 				fail(w, 400, "invalid_json")
 				return
 			}
 			v, ok := body["done"]
 			var done bool
-			if !ok || json.Unmarshal(v, &done) != nil {
+			if !ok || string(v) == "null" || json.Unmarshal(v, &done) != nil {
 				fail(w, 400, "done_required")
 				return
 			}

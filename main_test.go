@@ -52,6 +52,16 @@ func TestTitleValidation(t *testing.T) {
 			t.Fatalf("%s: %d %s", tc.code, w.Code, w.Body)
 		}
 	}
+	for _, tc := range []struct{ body, code string }{{`{"title":""}`, "title_blank"}, {`{"title":null}`, "invalid_json"}, {`{"title":7}`, "invalid_json"}} {
+		before := call(h, "GET", "/api/todos", "").Body.String()
+		w = call(h, "POST", "/api/todos", tc.body)
+		if w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"`+tc.code+`"`) {
+			t.Fatalf("invalid title body %s: %d %s", tc.body, w.Code, w.Body)
+		}
+		if after := call(h, "GET", "/api/todos", "").Body.String(); after != before {
+			t.Fatalf("rejected title changed list: before=%s after=%s", before, after)
+		}
+	}
 	for _, title := range []string{strings.Repeat("가", 200), strings.Repeat("🙂", 200)} {
 		w = call(h, "POST", "/api/todos", fmt.Sprintf(`{"title":%q}`, title))
 		if w.Code != 201 {
@@ -71,10 +81,20 @@ func TestOrderAndCompletion(t *testing.T) {
 	for _, s := range []string{"가", "나", "다"} {
 		call(h, "POST", "/api/todos", fmt.Sprintf(`{"title":%q}`, s))
 	}
-	for _, done := range []string{"true", "false", "true"} {
+	for _, done := range []string{"true", "true", "false", "true"} {
 		w := call(h, "PATCH", "/api/todos/1", `{"done":`+done+`}`)
 		if w.Code != 200 {
 			t.Fatalf("patch: %d %s", w.Code, w.Body)
+		}
+	}
+	for _, body := range []string{`{"done":null}`, `{}`, `{"done":"true"}`} {
+		before := call(h, "GET", "/api/todos", "").Body.String()
+		w := call(h, "PATCH", "/api/todos/1", body)
+		if w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"done_required"`) {
+			t.Fatalf("invalid done %s: %d %s", body, w.Code, w.Body)
+		}
+		if after := call(h, "GET", "/api/todos", "").Body.String(); after != before {
+			t.Fatalf("rejected update changed list: before=%s after=%s", before, after)
 		}
 	}
 	w := call(h, "GET", "/api/todos", "")
@@ -94,6 +114,10 @@ func TestDeleteAndMissingIDs(t *testing.T) {
 	if w.Code != 204 {
 		t.Fatalf("delete: %d", w.Code)
 	}
+	w = call(h, "DELETE", "/api/todos/2", "")
+	if w.Code != 404 || !strings.Contains(w.Body.String(), `"code":"not_found"`) {
+		t.Fatalf("repeated delete: %d %s", w.Code, w.Body)
+	}
 	w = call(h, "GET", "/api/todos", "")
 	if strings.Contains(w.Body.String(), "나") || !strings.Contains(w.Body.String(), `"title":"다","done":true`) {
 		t.Fatalf("remaining: %s", w.Body)
@@ -110,11 +134,23 @@ func TestDeleteAndMissingIDs(t *testing.T) {
 func TestPageAndErrorMessages(t *testing.T) {
 	h := newHandler(NewStore())
 	w := call(h, "GET", "/", "")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `id="error"`) || !strings.Contains(w.Body.String(), `id="filter-slot"`) {
+	page := w.Body.String()
+	if w.Code != 200 || !strings.Contains(page, `id="error"`) || !strings.Contains(page, `id="filter-slot"`) || !strings.Contains(page, `id="title"`) || !strings.Contains(page, `id="add-form"`) || !strings.Contains(page, `id="todos"`) || !strings.Contains(page, "할 일 목록") || !strings.Contains(page, "추가") || !strings.Contains(page, "삭제") {
 		t.Fatalf("page: %d", w.Code)
 	}
-	start := strings.Index(w.Body.String(), "<script type=\"application/json\" id=\"error-messages\">") + len("<script type=\"application/json\" id=\"error-messages\">")
-	end := strings.Index(w.Body.String()[start:], "</script>") + start
+	for _, msg := range errorMessages {
+		if strings.Count(page, msg) != 1 {
+			t.Fatalf("error message %q must appear only once in the page", msg)
+		}
+	}
+	if strings.Contains(page, `id="error">`) && !strings.Contains(page, `id="error" role="alert"></p>`) {
+		t.Fatal("error area must initially be empty")
+	}
+	start := strings.Index(page, "<script type=\"application/json\" id=\"error-messages\">") + len("<script type=\"application/json\" id=\"error-messages\">")
+	if start < len("<script type=\"application/json\" id=\"error-messages\">") {
+		t.Fatal("missing machine-readable error table")
+	}
+	end := strings.Index(page[start:], "</script>") + start
 	var msgs struct {
 		Default string            `json:"default"`
 		Codes   map[string]string `json:"codes"`
