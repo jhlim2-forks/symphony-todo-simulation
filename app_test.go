@@ -118,6 +118,18 @@ func TestErrorMessagesAndPage(t *testing.T) {
 	if page.Code != 200 {
 		t.Fatal(page.Code, page.Body)
 	}
+	pageHTML := page.Body.String()
+	for _, element := range []string{
+		`<input id="title"`,
+		`<input id="new-due" type="date">`,
+		`<button>추가</button>`,
+		`<div id="todos"></div>`,
+		`<p id="error" aria-live="polite"></p>`,
+	} {
+		if !strings.Contains(pageHTML, element) {
+			t.Errorf("page is missing required screen element %q", element)
+		}
+	}
 
 	contract := map[string]string{
 		"invalid_json":       "요청 형식이 올바르지 않습니다.",
