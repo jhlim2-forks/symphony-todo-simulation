@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"io"
@@ -167,9 +168,16 @@ func (a *App) update(w http.ResponseWriter, r *http.Request, id int) {
 		return
 	}
 	var done bool
-	if hasDone && json.Unmarshal(raw["done"], &done) != nil {
-		a.err(w, 400, "done_required")
-		return
+	if hasDone {
+		doneRaw := bytes.TrimSpace(raw["done"])
+		if !bytes.Equal(doneRaw, []byte("true")) && !bytes.Equal(doneRaw, []byte("false")) {
+			a.err(w, 400, "done_required")
+			return
+		}
+		if json.Unmarshal(doneRaw, &done) != nil {
+			a.err(w, 400, "done_required")
+			return
+		}
 	}
 	var due *string
 	if hasDue && string(dueRaw) != "null" {

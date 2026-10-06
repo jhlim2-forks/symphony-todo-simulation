@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -94,7 +95,24 @@ func TestStateOrderingDeleteAndMissing(t *testing.T) {
 	}
 }
 
-// REQ-08: 화면의 오류 표와 API 오류는 정해진 한국어 문구를 사용한다.
+// REQ-05 (#7): PATCH에서 null은 유효한 완료 여부가 아니며 기존 상태를 바꾸지 않는다.
+func TestPatchDoneNullIsRejectedWithoutChangingState(t *testing.T) {
+	h := NewHandler()
+	call(h, "POST", "/api/todos", `{"title":"완료된 할 일"}`)
+	if w := call(h, "PATCH", "/api/todos/1", `{"done":true}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body)
+	}
+	w := call(h, "PATCH", "/api/todos/1", `{"done":null}`)
+	if w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"done_required"`) || !strings.Contains(w.Body.String(), messages["done_required"]) {
+		t.Fatalf("expected done_required, got %d %s", w.Code, w.Body)
+	}
+	w = call(h, "GET", "/api/todos", "")
+	if !strings.Contains(w.Body.String(), `"done":true`) {
+		t.Fatalf("null changed the completed state: %s", w.Body)
+	}
+}
+
+// REQ-08 (#7): HTML의 오류 안내 표와 서버 응답은 API 계약의 여덟 문구 및 405 응답과 일치한다.
 func TestErrorMessagesAndPage(t *testing.T) {
 	h := NewHandler()
 	w := call(h, "POST", "/api/todos", "bad")
@@ -102,13 +120,60 @@ func TestErrorMessagesAndPage(t *testing.T) {
 		t.Fatal(w.Body)
 	}
 	page := call(h, "GET", "/", "")
-	if page.Code != 200 || !strings.Contains(page.Body.String(), `id="error-messages"`) || !strings.Contains(page.Body.String(), "마감일 지우기") {
+	if page.Code != 200 || !strings.Contains(page.Body.String(), "마감일 지우기") {
 		t.Fatal(page.Code, page.Body)
 	}
-	for _, v := range messages {
-		if !strings.Contains(page.Body.String(), v) {
-			t.Fatalf("page lacks %q", v)
+
+	contract := map[string]string{
+		"invalid_json":       "요청 형식이 올바르지 않습니다.",
+		"title_blank":        "할 일 제목을 입력해 주세요.",
+		"title_too_long":     "할 일 제목은 200자까지 입력할 수 있습니다.",
+		"done_required":      "완료 여부(done)를 true 또는 false로 보내 주세요.",
+		"due_invalid":        "마감일은 2026-03-01처럼 실제로 있는 날짜로 입력해 주세요.",
+		"nothing_to_update":  "바꿀 내용을 보내 주세요. 완료 여부(done) 또는 마감일(due)이 필요합니다.",
+		"not_found":          "해당 할 일을 찾을 수 없습니다.",
+		"method_not_allowed": "허용되지 않은 요청 방식입니다.",
+	}
+	const defaultMessage = "요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요."
+	matcher := regexp.MustCompile(`<script type="application/json" id="error-messages">([\s\S]*?)</script>`)
+	matches := matcher.FindStringSubmatch(page.Body.String())
+	if len(matches) != 2 {
+		t.Fatal("error-messages JSON element missing")
+	}
+	var payload struct {
+		Default string            `json:"default"`
+		Codes   map[string]string `json:"codes"`
+	}
+	if err := json.Unmarshal([]byte(matches[1]), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Default != defaultMessage || len(payload.Codes) != len(contract) {
+		t.Fatalf("unexpected page error table: %+v", payload)
+	}
+	for code, message := range contract {
+		if payload.Codes[code] != message {
+			t.Errorf("page code %q: got %q, want %q", code, payload.Codes[code], message)
 		}
+	}
+	if len(payload.Codes) != len(contract) {
+		t.Fatalf("page has unexpected error codes: %v", payload.Codes)
+	}
+
+	put := call(h, "PUT", "/api/todos", "")
+	var api struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if put.Code != 405 {
+		t.Fatalf("PUT status = %d, want 405", put.Code)
+	}
+	if err := json.Unmarshal(put.Body.Bytes(), &api); err != nil {
+		t.Fatal(err)
+	}
+	if api.Error.Code != "method_not_allowed" || api.Error.Message != contract["method_not_allowed"] {
+		t.Fatalf("unexpected 405 response: %+v", api)
 	}
 }
 
