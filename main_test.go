@@ -104,7 +104,7 @@ func TestOrderAndCompletion(t *testing.T) {
 			t.Fatalf("list state for done=%s: %+v err=%v", tc.done, listed, err)
 		}
 	}
-	for _, body := range []string{`{"done":null}`, `{}`, `{"done":"true"}`} {
+	for _, body := range []string{`{"done":null}`, `{"done":"true"}`} {
 		before := call(h, "GET", "/api/todos", "").Body.String()
 		w := call(h, "PATCH", "/api/todos/1", body)
 		if w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"done_required"`) {
@@ -114,9 +114,45 @@ func TestOrderAndCompletion(t *testing.T) {
 			t.Fatalf("rejected update changed list: before=%s after=%s", before, after)
 		}
 	}
-	w := call(h, "GET", "/api/todos", "")
+	w := call(h, "PATCH", "/api/todos/1", `{}`)
+	if w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"nothing_to_update"`) {
+		t.Fatalf("empty patch: %d %s", w.Code, w.Body)
+	}
+	w = call(h, "GET", "/api/todos", "")
 	if !strings.Contains(w.Body.String(), `"title":"가","done":true`) || strings.Index(w.Body.String(), "가") > strings.Index(w.Body.String(), "나") {
 		t.Fatalf("order/state: %s", w.Body)
+	}
+}
+
+// REQ-11, REQ-12, REQ-13, REQ-14: Deadlines are optional, calendar-valid dates and independently editable.
+func TestDeadlines(t *testing.T) {
+	h := newHandler(NewStore())
+	add := call(h, "POST", "/api/todos", `{"title":"작업","due":"2024-02-29"}`)
+	if add.Code != 201 || !strings.Contains(add.Body.String(), `"due":"2024-02-29"`) {
+		t.Fatalf("valid due: %d %s", add.Code, add.Body)
+	}
+	if w := call(h, "POST", "/api/todos", `{"title":"기본"}`); w.Code != 201 || !strings.Contains(w.Body.String(), `"due":null`) {
+		t.Fatalf("missing due: %d %s", w.Code, w.Body)
+	}
+	for _, date := range []string{"2026-02-30", "2026-13-01", "2026-02-29", "2026-3-1", "03/01/2026", "2026-03-01T10:00:00Z"} {
+		before := call(h, "GET", "/api/todos", "").Body.String()
+		w := call(h, "POST", "/api/todos", fmt.Sprintf(`{"title":"bad","due":%q}`, date))
+		if w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"due_invalid"`) {
+			t.Fatalf("invalid due %s: %d %s", date, w.Code, w.Body)
+		}
+		if after := call(h, "GET", "/api/todos", "").Body.String(); after != before {
+			t.Fatalf("invalid due changed list")
+		}
+	}
+	for _, body := range []string{`{"due":"2026-03-01"}`, `{"due":"2026-04-02"}`, `{"due":null}`} {
+		w := call(h, "PATCH", "/api/todos/2", body)
+		if w.Code != 200 {
+			t.Fatalf("patch due: %d %s", w.Code, w.Body)
+		}
+	}
+	list := call(h, "GET", "/api/todos", "").Body.String()
+	if !strings.Contains(list, `"title":"작업","done":false,"due":"2024-02-29"`) || !strings.Contains(list, `"title":"기본","done":false,"due":null`) {
+		t.Fatalf("due updates changed other fields: %s", list)
 	}
 }
 
@@ -161,12 +197,52 @@ func TestDeleteAndMissingIDs(t *testing.T) {
 // REQ-08: The page is Korean and its machine-readable error messages exactly match the API contract.
 func TestPageAndErrorMessages(t *testing.T) {
 	h := newHandler(NewStore())
+	contract := map[string]string{
+		"invalid_json": "요청 형식이 올바르지 않습니다.", "title_blank": "할 일 제목을 입력해 주세요.",
+		"title_too_long": "할 일 제목은 200자까지 입력할 수 있습니다.", "done_required": "완료 여부(done)를 true 또는 false로 보내 주세요.",
+		"due_invalid": "마감일은 2026-03-01처럼 실제로 있는 날짜로 입력해 주세요.", "nothing_to_update": "바꿀 내용을 보내 주세요. 완료 여부(done) 또는 마감일(due)이 필요합니다.",
+		"not_found": "해당 할 일을 찾을 수 없습니다.", "method_not_allowed": "허용되지 않은 요청 방식입니다.",
+	}
+	if len(errorMessages) != len(contract) {
+		t.Fatalf("server error map has unexpected codes: %+v", errorMessages)
+	}
+	for code, msg := range contract {
+		if errorMessages[code] != msg {
+			t.Errorf("server contract %s: %q", code, errorMessages[code])
+		}
+	}
+	// Compare actual API responses with the documented contract too. Comparing
+	// only the page and server maps would let both drift together unnoticed.
+	for _, tc := range []struct {
+		method, path, body string
+		code               string
+	}{
+		{"POST", "/api/todos", "not json", "invalid_json"},
+		{"POST", "/api/todos", `{"title":"   "}`, "title_blank"},
+		{"POST", "/api/todos", fmt.Sprintf(`{"title":%q}`, strings.Repeat("가", 201)), "title_too_long"},
+		{"PATCH", "/api/todos/1", `{"done":null}`, "done_required"},
+		{"POST", "/api/todos", `{"title":"작업","due":"2026-02-30"}`, "due_invalid"},
+		{"PATCH", "/api/todos/1", `{}`, "nothing_to_update"},
+		{"DELETE", "/api/todos/999", "", "not_found"},
+		{"PUT", "/api/todos", "", "method_not_allowed"},
+	} {
+		response := call(h, tc.method, tc.path, tc.body)
+		var got struct {
+			Error apiError `json:"error"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode %s response: %v (%s)", tc.code, err, response.Body)
+		}
+		if got.Error.Code != tc.code || got.Error.Message != contract[tc.code] {
+			t.Errorf("%s response: got code=%q message=%q, want message=%q", tc.code, got.Error.Code, got.Error.Message, contract[tc.code])
+		}
+	}
 	w := call(h, "GET", "/", "")
 	page := w.Body.String()
 	if w.Code != 200 || !strings.Contains(page, `id="error"`) || !strings.Contains(page, `id="filter-slot"`) || !strings.Contains(page, `id="title"`) || !strings.Contains(page, `id="add-form"`) || !strings.Contains(page, `id="todos"`) || !strings.Contains(page, "할 일 목록") || !strings.Contains(page, "추가") || !strings.Contains(page, "삭제") {
 		t.Fatalf("page: %d", w.Code)
 	}
-	for _, msg := range errorMessages {
+	for _, msg := range contract {
 		if strings.Count(page, msg) != 1 {
 			t.Fatalf("error message %q must appear only once in the page", msg)
 		}
@@ -186,10 +262,10 @@ func TestPageAndErrorMessages(t *testing.T) {
 	if err := json.Unmarshal([]byte(w.Body.String()[start:end]), &msgs); err != nil {
 		t.Fatal(err)
 	}
-	if msgs.Default != "요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요." || len(msgs.Codes) != len(errorMessages) {
+	if msgs.Default != "요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요." || len(msgs.Codes) != len(contract) {
 		t.Fatalf("message table: %+v", msgs)
 	}
-	for code, msg := range errorMessages {
+	for code, msg := range contract {
 		if msgs.Codes[code] != msg {
 			t.Errorf("%s: %q != %q", code, msgs.Codes[code], msg)
 		}
