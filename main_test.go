@@ -144,16 +144,55 @@ func TestDeadlines(t *testing.T) {
 			t.Fatalf("invalid due changed list")
 		}
 	}
-	for _, body := range []string{`{"due":"2026-03-01"}`, `{"due":"2026-04-02"}`, `{"due":null}`} {
-		w := call(h, "PATCH", "/api/todos/2", body)
+	for i, tc := range []struct {
+		body string
+		want *string
+	}{{`{"due":"2026-03-01"}`, strptr("2026-03-01")}, {`{"due":"2026-04-02"}`, strptr("2026-04-02")}, {`{"due":null}`, nil}} {
+		w := call(h, "PATCH", "/api/todos/2", tc.body)
 		if w.Code != 200 {
 			t.Fatalf("patch due: %d %s", w.Code, w.Body)
 		}
+		var updated Todo
+		if err := json.Unmarshal(w.Body.Bytes(), &updated); err != nil || !sameStringPtr(updated.Due, tc.want) {
+			t.Fatalf("patch due step %d response: %+v err=%v", i, updated, err)
+		}
+		if updated.Title != "기본" || updated.Done {
+			t.Fatalf("patch due step %d changed unrelated fields: %+v", i, updated)
+		}
+		var listed struct {
+			Todos []Todo `json:"todos"`
+		}
+		if err := json.Unmarshal(call(h, "GET", "/api/todos", "").Body.Bytes(), &listed); err != nil || !sameStringPtr(listed.Todos[1].Due, tc.want) {
+			t.Fatalf("patch due step %d list: %+v err=%v", i, listed, err)
+		}
+	}
+	// Invalid dates in an update must preserve the current deadline and all other fields.
+	before := call(h, "GET", "/api/todos", "").Body.String()
+	w := call(h, "PATCH", "/api/todos/1", `{"due":"2026-02-30"}`)
+	if w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"due_invalid"`) {
+		t.Fatalf("invalid due update: %d %s", w.Code, w.Body)
+	}
+	if after := call(h, "GET", "/api/todos", "").Body.String(); after != before {
+		t.Fatalf("invalid due update changed list: before=%s after=%s", before, after)
+	}
+	// Updating completion alone must retain the deadline.
+	w = call(h, "PATCH", "/api/todos/1", `{"done":true}`)
+	var doneUpdated Todo
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &doneUpdated) != nil || !doneUpdated.Done || !sameStringPtr(doneUpdated.Due, strptr("2024-02-29")) {
+		t.Fatalf("completion update changed deadline: %d %+v", w.Code, doneUpdated)
 	}
 	list := call(h, "GET", "/api/todos", "").Body.String()
-	if !strings.Contains(list, `"title":"작업","done":false,"due":"2024-02-29"`) || !strings.Contains(list, `"title":"기본","done":false,"due":null`) {
+	if !strings.Contains(list, `"title":"작업","done":true,"due":"2024-02-29"`) || !strings.Contains(list, `"title":"기본","done":false,"due":null`) {
 		t.Fatalf("due updates changed other fields: %s", list)
 	}
+}
+
+func strptr(s string) *string { return &s }
+func sameStringPtr(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // REQ-06, REQ-07: Deleting one item preserves others, while missing or malformed IDs return not found.
@@ -239,7 +278,7 @@ func TestPageAndErrorMessages(t *testing.T) {
 	}
 	w := call(h, "GET", "/", "")
 	page := w.Body.String()
-	if w.Code != 200 || !strings.Contains(page, `id="error"`) || !strings.Contains(page, `id="filter-slot"`) || !strings.Contains(page, `id="title"`) || !strings.Contains(page, `id="add-form"`) || !strings.Contains(page, `id="todos"`) || !strings.Contains(page, "할 일 목록") || !strings.Contains(page, "추가") || !strings.Contains(page, "삭제") {
+	if w.Code != 200 || !strings.Contains(page, `id="error"`) || !strings.Contains(page, `id="filter-slot"`) || !strings.Contains(page, `id="title"`) || !strings.Contains(page, `id="add-form"`) || !strings.Contains(page, `id="due" type="date"`) || !strings.Contains(page, `id="todos"`) || !strings.Contains(page, "마감일 없음") || !strings.Contains(page, "마감일 지우기") || !strings.Contains(page, "추가") || !strings.Contains(page, "삭제") {
 		t.Fatalf("page: %d", w.Code)
 	}
 	for _, msg := range contract {
@@ -262,7 +301,7 @@ func TestPageAndErrorMessages(t *testing.T) {
 	if err := json.Unmarshal([]byte(w.Body.String()[start:end]), &msgs); err != nil {
 		t.Fatal(err)
 	}
-	if msgs.Default != "요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요." || len(msgs.Codes) != len(contract) {
+	if msgs.Default != "요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요." || len(msgs.Codes) != len(contract) || strings.Count(page, msgs.Default) != 1 {
 		t.Fatalf("message table: %+v", msgs)
 	}
 	for code, msg := range contract {
