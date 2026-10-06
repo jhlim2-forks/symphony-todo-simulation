@@ -15,10 +15,11 @@ import (
 )
 
 type Todo struct {
-	ID    int     `json:"id"`
-	Title string  `json:"title"`
-	Done  bool    `json:"done"`
-	Due   *string `json:"due"`
+	ID      int     `json:"id"`
+	Title   string  `json:"title"`
+	Done    bool    `json:"done"`
+	Due     *string `json:"due"`
+	Overdue bool    `json:"overdue"`
 }
 type Store struct {
 	mu    sync.Mutex
@@ -27,6 +28,26 @@ type Store struct {
 }
 
 func NewStore() *Store { return &Store{todos: []Todo{}, next: 1} }
+
+var currentDate = func() string { return time.Now().Format("2006-01-02") }
+
+func responseTodo(todo Todo) Todo {
+	return todoAtDate(todo, currentDate())
+}
+
+func todoAtDate(todo Todo, today string) Todo {
+	todo.Overdue = todo.Due != nil && !todo.Done && *todo.Due < today
+	return todo
+}
+
+func responseTodos(todos []Todo) []Todo {
+	result := make([]Todo, len(todos))
+	today := currentDate()
+	for i, todo := range todos {
+		result[i] = todoAtDate(todo, today)
+	}
+	return result
+}
 
 type App struct {
 	store *Store
@@ -62,6 +83,14 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		default:
 			a.err(w, 405, "method_not_allowed")
 		}
+		return
+	}
+	if r.URL.Path == "/api/todos/completed" {
+		if r.Method != "DELETE" {
+			a.err(w, 405, "method_not_allowed")
+			return
+		}
+		a.deleteCompleted(w)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/todos/") {
@@ -105,7 +134,22 @@ func decode(r *http.Request, v any) bool {
 func (a *App) list(w http.ResponseWriter) {
 	a.store.mu.Lock()
 	defer a.store.mu.Unlock()
-	writeJSON(w, 200, map[string]any{"todos": a.store.todos})
+	writeJSON(w, 200, map[string]any{"todos": responseTodos(a.store.todos)})
+}
+func (a *App) deleteCompleted(w http.ResponseWriter) {
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+	remaining := make([]Todo, 0, len(a.store.todos))
+	deleted := 0
+	for _, todo := range a.store.todos {
+		if todo.Done {
+			deleted++
+		} else {
+			remaining = append(remaining, todo)
+		}
+	}
+	a.store.todos = remaining
+	writeJSON(w, 200, map[string]any{"deleted": deleted, "todos": responseTodos(remaining)})
 }
 func validDue(s string) bool {
 	if len(s) != 10 || s[4] != '-' || s[7] != '-' {
@@ -149,11 +193,11 @@ func (a *App) create(w http.ResponseWriter, r *http.Request) {
 		due = &s
 	}
 	a.store.mu.Lock()
-	t := Todo{a.store.next, title, false, due}
+	t := Todo{a.store.next, title, false, due, false}
 	a.store.next++
 	a.store.todos = append(a.store.todos, t)
 	a.store.mu.Unlock()
-	writeJSON(w, 201, t)
+	writeJSON(w, 201, responseTodo(t))
 }
 func (a *App) update(w http.ResponseWriter, r *http.Request, id int) {
 	var raw map[string]json.RawMessage
@@ -202,7 +246,7 @@ func (a *App) update(w http.ResponseWriter, r *http.Request, id int) {
 			if hasDue {
 				a.store.todos[i].Due = due
 			}
-			writeJSON(w, 200, a.store.todos[i])
+			writeJSON(w, 200, responseTodo(a.store.todos[i]))
 			return
 		}
 	}
