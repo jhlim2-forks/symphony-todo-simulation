@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -115,12 +114,8 @@ func TestPatchDoneNullIsRejectedWithoutChangingState(t *testing.T) {
 // REQ-08 (#7): HTML의 오류 안내 표와 서버 응답은 API 계약의 여덟 문구 및 405 응답과 일치한다.
 func TestErrorMessagesAndPage(t *testing.T) {
 	h := NewHandler()
-	w := call(h, "POST", "/api/todos", "bad")
-	if w.Code != 400 || !bytes.Contains(w.Body.Bytes(), []byte(messages["invalid_json"])) {
-		t.Fatal(w.Body)
-	}
 	page := call(h, "GET", "/", "")
-	if page.Code != 200 || !strings.Contains(page.Body.String(), "마감일 지우기") {
+	if page.Code != 200 {
 		t.Fatal(page.Code, page.Body)
 	}
 
@@ -158,6 +153,40 @@ func TestErrorMessagesAndPage(t *testing.T) {
 	if len(payload.Codes) != len(contract) {
 		t.Fatalf("page has unexpected error codes: %v", payload.Codes)
 	}
+	if !strings.Contains(page.Body.String(), "마감일 없음") ||
+		!strings.Contains(page.Body.String(), "마감일: '+t.due") ||
+		!strings.Contains(page.Body.String(), "type:'date'") ||
+		!strings.Contains(page.Body.String(), "마감일 지우기") {
+		t.Fatal("page is missing a due date display, empty label, date input, or clear button")
+	}
+
+	// Compare every API response to the approved contract text, independently of
+	// the server's message table so a wrong server message cannot validate itself.
+	requests := []struct {
+		method, path, body, code string
+	}{
+		{"POST", "/api/todos", "bad", "invalid_json"},
+		{"POST", "/api/todos", `{"title":"  "}`, "title_blank"},
+		{"POST", "/api/todos", `{"title":"` + strings.Repeat("가", 201) + `"}`, "title_too_long"},
+		{"PATCH", "/api/todos/1", `{"done":null}`, "done_required"},
+		{"POST", "/api/todos", `{"title":"x","due":"2026-02-30"}`, "due_invalid"},
+		{"PATCH", "/api/todos/1", `{}`, "nothing_to_update"},
+		{"PATCH", "/api/todos/999", `{"due":null}`, "not_found"},
+	}
+	for _, tc := range requests {
+		w := call(h, tc.method, tc.path, tc.body)
+		var response struct {
+			Error struct {
+				Code, Message string
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Error.Code != tc.code || response.Error.Message != contract[tc.code] {
+			t.Errorf("%s response = %+v, want %q: %q", tc.code, response.Error, tc.code, contract[tc.code])
+		}
+	}
 
 	put := call(h, "PUT", "/api/todos", "")
 	var api struct {
@@ -189,6 +218,19 @@ func TestDueDateValidation(t *testing.T) {
 	if w := call(h, "POST", "/api/todos", `{"title":"x","due":"2024-02-29"}`); w.Code != 201 {
 		t.Fatal(w.Code, w.Body)
 	}
+	call(h, "POST", "/api/todos", `{"title":"기존 마감일","due":"2026-03-01"}`)
+	if w := call(h, "PATCH", "/api/todos/2", `{"due":"2026-02-30"}`); w.Code != 400 {
+		t.Fatalf("invalid PATCH due: %d %s", w.Code, w.Body)
+	}
+	var listed struct {
+		Todos []Todo `json:"todos"`
+	}
+	if err := json.Unmarshal(call(h, "GET", "/api/todos", "").Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Todos) != 2 || listed.Todos[1].Due == nil || *listed.Todos[1].Due != "2026-03-01" {
+		t.Fatalf("invalid due changed existing data: %+v", listed.Todos)
+	}
 }
 
 // REQ-13, REQ-14: 마감일은 독립적으로 수정·삭제되고 목록 순서는 유지된다.
@@ -196,13 +238,24 @@ func TestDueUpdateAndDisplay(t *testing.T) {
 	h := NewHandler()
 	call(h, "POST", "/api/todos", `{"title":"가"}`)
 	call(h, "POST", "/api/todos", `{"title":"나","due":"2026-03-01"}`)
+	call(h, "PATCH", "/api/todos/1", `{"done":true}`)
 	w := call(h, "PATCH", "/api/todos/1", `{"due":"2026-04-02"}`)
 	v := decodeTodo(t, w.Body.Bytes())
-	if v.Due == nil || *v.Due != "2026-04-02" {
+	if v.Due == nil || *v.Due != "2026-04-02" || v.Title != "가" || !v.Done {
 		t.Fatal(w.Body)
 	}
 	if call(h, "PATCH", "/api/todos/1", `{"due":"2026-02-30"}`).Code != 400 {
 		t.Fatal("invalid due accepted")
+	}
+	w = call(h, "GET", "/api/todos", "")
+	var listed struct {
+		Todos []Todo `json:"todos"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Todos) != 2 || listed.Todos[0].Title != "가" || !listed.Todos[0].Done || listed.Todos[0].Due == nil || *listed.Todos[0].Due != "2026-04-02" || listed.Todos[1].Title != "나" || listed.Todos[1].Due == nil || *listed.Todos[1].Due != "2026-03-01" {
+		t.Fatalf("due update changed unrelated data: %+v", listed.Todos)
 	}
 	call(h, "PATCH", "/api/todos/1", `{"due":null}`)
 	w = call(h, "GET", "/api/todos", "")
