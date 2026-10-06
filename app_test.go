@@ -218,6 +218,48 @@ func TestErrorMessagesAndPage(t *testing.T) {
 	}
 }
 
+// REQ-10: 화면은 기본 전체 선택, 세 필터와 빈 결과별 안내를 제공하고 필터 선택은 화면 안에서 처리한다.
+func TestTodoFilterUI(t *testing.T) {
+	page := call(NewHandler(), "GET", "/", "")
+	html := page.Body.String()
+	for _, want := range []string{
+		`name="filter" value="all" checked`,
+		`name="filter" value="active"`,
+		`name="filter" value="done"`,
+		`id="filter-messages"`,
+		`"all":"할 일이 없습니다."`,
+		`"active":"진행 중인 할 일이 없습니다."`,
+		`"done":"완료한 할 일이 없습니다."`,
+		`selectedFilter='all'`,
+		`allTodos.filter(t=>selectedFilter==='all'||(selectedFilter==='active'&&!t.done)||(selectedFilter==='done'&&t.done))`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("filter UI is missing %q", want)
+		}
+	}
+	if got := call(NewHandler(), "GET", "/api/todos", "").Body.String(); got != "{\"todos\":[]}\n" {
+		t.Fatalf("filter must not alter the server list: %s", got)
+	}
+}
+
+// REQ-15, REQ-18 (#14): 완료 비우기는 필터 상태와 무관하게 전체 완료 건수를 확인하고 서버 응답 목록으로 화면을 갱신한다.
+func TestClearCompletedUsesFullListAndResponse(t *testing.T) {
+	page := call(NewHandler(), "GET", "/", "")
+	html := page.Body.String()
+	for _, want := range []string{
+		"function render(todos=allTodos){allTodos=todos;",
+		"const count=allTodos.filter(t=>t.done).length",
+		"render(result.todos)",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("clear completed UI is missing behavior %q", want)
+		}
+	}
+	if strings.Contains(html, `querySelectorAll('#todos .todo')`) {
+		t.Fatal("clear completed count must not depend on the visible filtered rows")
+	}
+}
+
 // REQ-12: 날짜는 형식에 맞고 달력에 실제 존재할 때만 허용된다.
 func TestDueDateValidation(t *testing.T) {
 	h := NewHandler()
