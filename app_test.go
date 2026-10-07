@@ -388,7 +388,7 @@ func TestClearCompletedConfirmationUI(t *testing.T) {
 	}
 }
 
-// REQ-17, REQ-18: 일괄 삭제는 완료 항목만 제거하고 진행 중 항목의 내용·순서·마감일을 보존하며 개수와 남은 목록을 돌려준다.
+// REQ-17, REQ-18 (#23): 일괄 삭제는 완료 항목만 제거하고 진행 중 항목의 내용·순서·마감일을 보존하며 개수와 남은 목록을 돌려준다.
 func TestDeleteCompletedPreservesInProgressTodosAndIDs(t *testing.T) {
 	h := NewHandler()
 	for _, body := range []string{
@@ -436,7 +436,7 @@ func TestDeleteCompletedPreservesInProgressTodosAndIDs(t *testing.T) {
 	}
 }
 
-// REQ-18: 완료 항목이 없을 때 일괄 삭제는 오류 없이 0개와 그대로인 목록을 반환한다.
+// REQ-18 (#23): 완료 항목이 없을 때 일괄 삭제는 오류 없이 0개와 그대로인 목록을 반환한다.
 func TestDeleteCompletedWhenNothingIsCompleted(t *testing.T) {
 	h := NewHandler()
 	call(h, "POST", "/api/todos", `{"title":"진행 중"}`)
