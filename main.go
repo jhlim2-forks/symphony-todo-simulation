@@ -64,6 +64,14 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if r.URL.Path == "/api/todos/completed" {
+		if r.Method != "DELETE" {
+			a.err(w, 405, "method_not_allowed")
+			return
+		}
+		a.deleteCompleted(w)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/todos/") {
 		id, e := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/api/todos/"))
 		if e != nil || id < 1 {
@@ -81,6 +89,22 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.err(w, 404, "not_found")
+}
+func (a *App) deleteCompleted(w http.ResponseWriter) {
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+
+	remaining := make([]Todo, 0, len(a.store.todos))
+	deleted := 0
+	for _, todo := range a.store.todos {
+		if todo.Done {
+			deleted++
+			continue
+		}
+		remaining = append(remaining, todo)
+	}
+	a.store.todos = remaining
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "todos": a.store.todos})
 }
 func (a *App) err(w http.ResponseWriter, status int, code string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": messages[code]}})
