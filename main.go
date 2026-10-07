@@ -152,21 +152,6 @@ func (a *App) list(w http.ResponseWriter) {
 	defer a.store.mu.Unlock()
 	writeJSON(w, 200, map[string]any{"todos": responseTodos(a.store.todos)})
 }
-func (a *App) deleteCompleted(w http.ResponseWriter) {
-	a.store.mu.Lock()
-	defer a.store.mu.Unlock()
-	remaining := make([]Todo, 0, len(a.store.todos))
-	deleted := 0
-	for _, todo := range a.store.todos {
-		if todo.Done {
-			deleted++
-		} else {
-			remaining = append(remaining, todo)
-		}
-	}
-	a.store.todos = remaining
-	writeJSON(w, 200, map[string]any{"deleted": deleted, "todos": responseTodos(remaining)})
-}
 func validDue(s string) bool {
 	if len(s) != 10 || s[4] != '-' || s[7] != '-' {
 		return false
