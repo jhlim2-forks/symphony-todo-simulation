@@ -460,3 +460,102 @@ func TestDeleteCompletedWhenNothingIsCompleted(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+// REQ-19: 기한이 오늘보다 앞선 미완료 할 일만 기한 지남으로 판정한다.
+func TestOverdueBoundaryAndCompletedExclusion(t *testing.T) {
+	oldDate := currentDate
+	currentDate = func() string { return "2026-03-10" }
+	defer func() { currentDate = oldDate }()
+	h := NewHandler()
+	for _, body := range []string{
+		`{"title":"어제","due":"2026-03-09"}`,
+		`{"title":"오늘","due":"2026-03-10"}`,
+		`{"title":"내일","due":"2026-03-11"}`,
+		`{"title":"없음"}`,
+		`{"title":"완료","due":"2026-03-09"}`,
+	} {
+		call(h, "POST", "/api/todos", body)
+	}
+	call(h, "PATCH", "/api/todos/5", `{"done":true}`)
+	var result struct {
+		Todos []Todo `json:"todos"`
+	}
+	if err := json.Unmarshal(call(h, "GET", "/api/todos", "").Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	want := []bool{true, false, false, false, false}
+	for i, todo := range result.Todos {
+		if todo.Overdue != want[i] {
+			t.Errorf("todo %d overdue=%v want %v", todo.ID, todo.Overdue, want[i])
+		}
+	}
+}
+
+// REQ-20: 매 응답 시점의 서버 지역 날짜가 바뀌면 저장을 바꾸지 않아도 판정이 갱신된다.
+func TestOverdueUsesCurrentServerDatePerResponse(t *testing.T) {
+	oldDate := currentDate
+	today := "2026-03-09"
+	currentDate = func() string { return today }
+	defer func() { currentDate = oldDate }()
+	h := NewHandler()
+	call(h, "POST", "/api/todos", `{"title":"마감","due":"2026-03-09"}`)
+	read := func() bool {
+		var result struct {
+			Todos []Todo `json:"todos"`
+		}
+		if err := json.Unmarshal(call(h, "GET", "/api/todos", "").Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result.Todos[0].Overdue
+	}
+	if read() {
+		t.Fatal("due today must not be overdue")
+	}
+	today = "2026-03-10"
+	if !read() {
+		t.Fatal("yesterday's due date should become overdue")
+	}
+}
+
+// REQ-21: 모든 할 일 응답은 계산된 overdue를 포함하고 요청의 overdue는 무시한다.
+func TestOverdueResponseContractAndIgnoredInput(t *testing.T) {
+	oldDate := currentDate
+	currentDate = func() string { return "2026-03-10" }
+	defer func() { currentDate = oldDate }()
+	h := NewHandler()
+	created := call(h, "POST", "/api/todos", `{"title":"x","due":"2026-03-09","overdue":false}`)
+	if created.Code != 201 || !strings.Contains(created.Body.String(), `"overdue":true`) {
+		t.Fatalf("create response: %d %s", created.Code, created.Body)
+	}
+	call(h, "POST", "/api/todos", `{"title":"남은 기한 지난 항목","due":"2026-03-09"}`)
+	if got := call(h, "PATCH", "/api/todos/1", `{"done":true,"overdue":true}`); got.Code != 200 || !strings.Contains(got.Body.String(), `"overdue":false`) {
+		t.Fatalf("patch response: %d %s", got.Code, got.Body)
+	}
+	if got := call(h, "PATCH", "/api/todos/1", `{"overdue":true}`); got.Code != 400 || !strings.Contains(got.Body.String(), `"code":"nothing_to_update"`) {
+		t.Fatalf("overdue-only patch: %d %s", got.Code, got.Body)
+	}
+	if got := call(h, "DELETE", "/api/todos/completed", ""); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"overdue":true`) {
+		t.Fatalf("bulk response must recalculate overdue for remaining todos: %d %s", got.Code, got.Body)
+	} else {
+		var result struct {
+			Deleted int    `json:"deleted"`
+			Todos   []Todo `json:"todos"`
+		}
+		if err := json.Unmarshal(got.Body.Bytes(), &result); err != nil || result.Deleted != 1 || len(result.Todos) != 1 || !result.Todos[0].Overdue {
+			t.Fatalf("unexpected recalculated bulk response: %+v (%v)", result, err)
+		}
+	}
+	if got := call(h, "GET", "/api/todos", ""); !strings.Contains(got.Body.String(), `"overdue":true`) {
+		t.Fatalf("list response missing recalculated value: %s", got.Body)
+	}
+}
+
+// REQ-22: 기한 지남 표시에는 빨간 글씨와 텍스트가 함께 쓰이고 응답 overdue 값으로만 정한다.
+func TestOverdueDisplayUsesResponseValue(t *testing.T) {
+	html := call(NewHandler(), "GET", "/", "").Body.String()
+	for _, required := range []string{`.overdue{color:#b00020}`, `t.overdue?' overdue':''`, `t.overdue?' · 기한 지남':''`} {
+		if !strings.Contains(html, required) {
+			t.Errorf("overdue UI missing %q", required)
+		}
+	}
+}
