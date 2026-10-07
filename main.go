@@ -125,7 +125,7 @@ func (a *App) deleteCompleted(w http.ResponseWriter) {
 		remaining = append(remaining, todo)
 	}
 	a.store.todos = remaining
-	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "todos": a.store.todos})
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "todos": responseTodos(a.store.todos)})
 }
 func (a *App) err(w http.ResponseWriter, status int, code string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": messages[code]}})

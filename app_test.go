@@ -527,17 +527,25 @@ func TestOverdueResponseContractAndIgnoredInput(t *testing.T) {
 	if created.Code != 201 || !strings.Contains(created.Body.String(), `"overdue":true`) {
 		t.Fatalf("create response: %d %s", created.Code, created.Body)
 	}
-	call(h, "POST", "/api/todos", `{"title":"남은 항목"}`)
+	call(h, "POST", "/api/todos", `{"title":"남은 기한 지난 항목","due":"2026-03-09"}`)
 	if got := call(h, "PATCH", "/api/todos/1", `{"done":true,"overdue":true}`); got.Code != 200 || !strings.Contains(got.Body.String(), `"overdue":false`) {
 		t.Fatalf("patch response: %d %s", got.Code, got.Body)
 	}
 	if got := call(h, "PATCH", "/api/todos/1", `{"overdue":true}`); got.Code != 400 || !strings.Contains(got.Body.String(), `"code":"nothing_to_update"`) {
 		t.Fatalf("overdue-only patch: %d %s", got.Code, got.Body)
 	}
-	if got := call(h, "DELETE", "/api/todos/completed", ""); !strings.Contains(got.Body.String(), `"overdue":`) {
-		t.Fatalf("bulk response missing overdue: %s", got.Body)
+	if got := call(h, "DELETE", "/api/todos/completed", ""); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"overdue":true`) {
+		t.Fatalf("bulk response must recalculate overdue for remaining todos: %d %s", got.Code, got.Body)
+	} else {
+		var result struct {
+			Deleted int    `json:"deleted"`
+			Todos   []Todo `json:"todos"`
+		}
+		if err := json.Unmarshal(got.Body.Bytes(), &result); err != nil || result.Deleted != 1 || len(result.Todos) != 1 || !result.Todos[0].Overdue {
+			t.Fatalf("unexpected recalculated bulk response: %+v (%v)", result, err)
+		}
 	}
-	if got := call(h, "GET", "/api/todos", ""); !strings.Contains(got.Body.String(), `"overdue":false`) {
+	if got := call(h, "GET", "/api/todos", ""); !strings.Contains(got.Body.String(), `"overdue":true`) {
 		t.Fatalf("list response missing recalculated value: %s", got.Body)
 	}
 }
